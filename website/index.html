@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>L00205200 - Raju | CloudFormation Lab</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <header class="site-header">
+    <h1>L00205200 - Raju</h1>
+    <p class="subtitle">CloudFormation Lab &middot; ATU DevOps</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>About this site</h2>
+      <p>
+        This is a static website. The HTML and CSS files are stored in a private
+        Amazon S3 bucket and delivered over HTTPS by Amazon CloudFront. All of the
+        supporting infrastructure is provisioned by an AWS CloudFormation template.
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>Architecture</h2>
+      <ol class="flow">
+        <li><strong>Browser</strong> requests the page over HTTPS.</li>
+        <li><strong>CloudFront</strong> serves the page from the nearest edge location, using its cache where possible.</li>
+        <li><strong>S3</strong> stores the files in a private, encrypted and versioned bucket.</li>
+      </ol>
+      <p>
+        The bucket cannot be accessed directly. Only this CloudFront distribution
+        is permitted to read from it, through Origin Access Control.
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>Best practices applied</h2>
+      <ul class="checks">
+        <li>Private bucket with all public access blocked</li>
+        <li>HTTPS enforced: HTTP is redirected, and S3 rejects non-TLS requests</li>
+        <li>Security headers added by CloudFront (HSTS, X-Frame-Options and others)</li>
+        <li>Encryption at rest and versioning enabled on the bucket</li>
+        <li>Templates validated with cfn-lint and checkov on every pull request</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>Deployed with AWS CloudFormation &middot; L00205200</p>
+  </footer>
+
+</body>
+</html>

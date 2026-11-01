@@ -1,0 +1,80 @@
+/* Stylesheet for the lab website. No frameworks are used, to keep page loads fast. */
+
+:root {
+  --navy: #232f3e;
+  --orange: #ff9900;
+  --bg: #f4f6f8;
+  --text: #1f2933;
+  --muted: #5f6b7a;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+}
+
+.site-header {
+  background: var(--navy);
+  color: #fff;
+  text-align: center;
+  padding: 40px 16px 32px;
+  border-bottom: 4px solid var(--orange);
+}
+
+.site-header h1 {
+  margin: 0;
+  font-size: 2.2rem;
+  letter-spacing: 1px;
+}
+
+.subtitle {
+  margin: 8px 0 0;
+  color: #d0d7de;
+}
+
+main {
+  max-width: 760px;
+  margin: 32px auto;
+  padding: 0 16px;
+}
+
+.card {
+  background: #fff;
+  border-radius: 8px;
+  padding: 20px 24px;
+  margin-bottom: 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.card h2 {
+  margin-top: 0;
+  color: var(--navy);
+  font-size: 1.3rem;
+}
+
+.flow li { margin-bottom: 6px; }
+
+.checks {
+  list-style: none;
+  padding-left: 0;
+}
+
+.checks li::before {
+  content: "\2713  ";
+  color: #1a7f37;
+  font-weight: bold;
+}
+
+a { color: #0b66c3; }
+
+.site-footer {
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.9rem;
+  padding: 16px;
+}
