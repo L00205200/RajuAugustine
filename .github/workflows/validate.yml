@@ -3,6 +3,7 @@
 #   - cfn-lint:   template syntax and AWS resource specification
 #   - checkov:    security and best-practice checks
 #   - shellcheck: common errors in the bash scripts
+# Each step is skipped if its files do not exist yet.
 name: Validate CloudFormation
 
 on:
@@ -24,11 +25,26 @@ jobs:
         run: pip install cfn-lint checkov
 
       - name: Run cfn-lint
-        run: cfn-lint templates/*.yaml
+        run: |
+          if ls templates/*.yaml >/dev/null 2>&1; then
+            cfn-lint templates/*.yaml
+          else
+            echo "No templates found - skipping"
+          fi
 
       - name: Run shellcheck
-        run: shellcheck scripts/*.sh   # Preinstalled on GitHub-hosted Ubuntu runners
+        run: |
+          if ls scripts/*.sh >/dev/null 2>&1; then
+            shellcheck scripts/*.sh   # Preinstalled on GitHub-hosted Ubuntu runners
+          else
+            echo "No scripts found - skipping"
+          fi
 
       - name: Run checkov
         # soft-fail reports findings for review without blocking the pull request
-        run: checkov -d templates --framework cloudformation --soft-fail
+        run: |
+          if [ -d templates ]; then
+            checkov -d templates --framework cloudformation --soft-fail
+          else
+            echo "No templates found - skipping"
+          fi
