@@ -1,0 +1,213 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CloudFormation Lab, Part A1a: static website for L00205200.
+  Site content from the website/ folder is stored in a private S3 bucket and
+  delivered over HTTPS through Amazon CloudFront.
+
+Parameters:
+  StudentNumber:
+    Type: String
+    Default: L00205200
+    AllowedPattern: '^L\d{8}$'
+    ConstraintDescription: Must be the letter L followed by eight digits.
+
+  # AWS Academy Learner Lab does not permit IAM role creation, so the
+  # pre-provisioned LabRole is used there. In a standard AWS account, select
+  # "create" to provision a dedicated least-privilege role instead.
+  IamMode:
+    Type: String
+    Default: learnerlab
+    AllowedValues: [learnerlab, create]
+    Description: learnerlab uses the existing LabRole; create provisions a new role.
+
+Conditions:
+  CreateIam: !Equals [!Ref IamMode, create]
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # S3 bucket
+  # Private bucket for the site content. Public access is fully blocked and
+  # CloudFront is the only permitted reader. Versioning allows rollback of
+  # individual files.
+  # ---------------------------------------------------------------------------
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced  # Disables ACLs
+      Tags:
+        - Key: Project
+          Value: CloudFormationLab
+        - Key: Student
+          Value: !Ref StudentNumber
+
+  # Bucket policy:
+  #   1. Allows read access only from this stack's CloudFront distribution.
+  #   2. Denies any request not made over HTTPS.
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${WebsiteBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CDN}'
+          - Sid: DenyNonHttps
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt WebsiteBucket.Arn
+              - !Sub '${WebsiteBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  # ---------------------------------------------------------------------------
+  # CloudFront
+  # Origin Access Control (OAC) restricts the bucket to CloudFront. It is the
+  # current AWS recommendation and replaces Origin Access Identity (OAI).
+  # ---------------------------------------------------------------------------
+  CdnOriginAccess:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-oac'
+        Description: Signs CloudFront requests to the website bucket
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  CDN:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub 'Lab website - ${StudentNumber}'
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100   # Europe and North America edge locations only, to reduce cost
+        Origins:
+          - Id: s3-site
+            DomainName: !GetAtt WebsiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt CdnOriginAccess.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''   # Must be empty when OAC is used
+        DefaultCacheBehavior:
+          TargetOriginId: s3-site
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6            # AWS managed: CachingOptimized
+          ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03  # AWS managed: SecurityHeadersPolicy
+        # A private bucket returns 403 rather than 404 for missing objects,
+        # so 403 responses are mapped to the custom error page.
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 404
+            ResponsePagePath: /error.html
+
+  # ---------------------------------------------------------------------------
+  # Bucket cleanup on stack deletion
+  # CloudFormation cannot delete a bucket that still contains objects, and
+  # versioning retains previous versions as well. This Lambda-backed custom
+  # resource empties the bucket when the stack is deleted, so teardown
+  # completes in a single step.
+  # ---------------------------------------------------------------------------
+
+  # Created only when IamMode is set to "create".
+  CleanupRole:
+    Type: AWS::IAM::Role
+    Condition: CreateIam
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole  # CloudWatch Logs
+      Policies:
+        - PolicyName: website-bucket-cleanup
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Scoped to this bucket only
+              - Effect: Allow
+                Action: [s3:DeleteObject, s3:DeleteObjectVersion]
+                Resource: !Sub '${WebsiteBucket.Arn}/*'
+              - Effect: Allow
+                Action: [s3:ListBucket, s3:ListBucketVersions]
+                Resource: !GetAtt WebsiteBucket.Arn
+
+  CleanupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Empties the website bucket when the stack is deleted
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !If
+        - CreateIam
+        - !GetAtt CleanupRole.Arn
+        - !Sub 'arn:aws:iam::${AWS::AccountId}:role/LabRole'
+      Timeout: 120
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          s3 = boto3.resource("s3")
+
+
+          def handler(event, context):
+              """Empty the bucket on Delete; take no action on Create or Update."""
+              bucket_name = event["ResourceProperties"]["BucketName"]
+              try:
+                  if event["RequestType"] == "Delete":
+                      # Remove all object versions so the bucket can be deleted
+                      s3.Bucket(bucket_name).object_versions.delete()
+                      print(f"Bucket {bucket_name} emptied")
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, bucket_name)
+              except Exception as error:
+                  print(f"Bucket cleanup failed: {error}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {"Error": str(error)})
+
+  BucketCleanup:
+    Type: Custom::BucketCleanup
+    Properties:
+      ServiceToken: !GetAtt CleanupFunction.Arn
+      BucketName: !Ref WebsiteBucket
+
+Outputs:
+  WebsiteURL:
+    Description: Public HTTPS address of the website
+    Value: !Sub 'https://${CDN.DomainName}'
+  BucketName:
+    Description: Bucket that the deployment script uploads website/ to
+    Value: !Ref WebsiteBucket
+  DistributionId:
+    Description: Distribution ID used by the deployment script to invalidate the cache
+    Value: !Ref CDN
