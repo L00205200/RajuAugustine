@@ -18,6 +18,7 @@ scripts/deploy-website.sh         Deploys the website stack and uploads website/
 scripts/deploy-three-tier.sh      Deploys the three-tier stack
 scripts/teardown.sh               Deletes both stacks
 docs/screenshots/                 Screenshots of the deployment and test results
+
 ```
 
 ## Part A1a - Static Website
