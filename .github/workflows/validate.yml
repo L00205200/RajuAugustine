@@ -1,0 +1,34 @@
+# Validates the CloudFormation templates and deployment scripts on every pull
+# request and on every push to main.
+#   - cfn-lint:   template syntax and AWS resource specification
+#   - checkov:    security and best-practice checks
+#   - shellcheck: common errors in the bash scripts
+name: Validate CloudFormation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install tools
+        run: pip install cfn-lint checkov
+
+      - name: Run cfn-lint
+        run: cfn-lint templates/*.yaml
+
+      - name: Run shellcheck
+        run: shellcheck scripts/*.sh   # Preinstalled on GitHub-hosted Ubuntu runners
+
+      - name: Run checkov
+        # soft-fail reports findings for review without blocking the pull request
+        run: checkov -d templates --framework cloudformation --soft-fail
