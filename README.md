@@ -5,7 +5,7 @@ This repository contains my submission for the CloudFormation lab. It covers two
 - **Part A1a – `templates/01-static-website.yaml`:** a static website stored in Amazon S3 and delivered through Amazon CloudFront.
 - **Part A1b – `templates/02-three-tier.yaml`:** a three-tier architecture with a web tier, an application tier and a database tier.
 
-Both stacks were deployed and tested in an AWS Academy Learner Lab account.
+Both stacks were deployed and tested in my personal AWS account using AWS CloudShell in `us-east-1`. Screenshots of each test are in `docs/screenshots/` and are shown in the [Testing](#testing) section.
 
 ## Repository Structure
 
@@ -51,7 +51,15 @@ One problem I ran into is that CloudFormation won't delete an S3 bucket if there
 ./scripts/deploy-website.sh
 ```
 
+In my personal AWS account I ran it with `IAM_MODE=create`, so the template created its own least-privilege role (see [IAM and Access Control](#iam-and-access-control)):
+
+```bash
+IAM_MODE=create ./scripts/deploy-website.sh
+```
+
 The first deployment takes about five minutes, mainly while CloudFront propagates. The script prints the website URL when it finishes.
+
+![Static website served through CloudFront](docs/screenshots/website.png)
 
 ## Part A1b - Three-Tier Architecture
 
@@ -97,7 +105,11 @@ To check that all three tiers actually work together, the web page has a small s
 ./scripts/deploy-three-tier.sh
 ```
 
+In my personal account I ran it as `IAM_MODE=create ./scripts/deploy-three-tier.sh`.
+
 Database creation is the slowest step and takes 10 to 15 minutes. After the stack completes, allow a few minutes for the instances to install nginx and pass their health checks, then open the URL printed by the script.
+
+![Three-tier page showing the app tier can reach the database](docs/screenshots/three-tier.png)
 
 ## IAM and Access Control
 
@@ -120,6 +132,18 @@ AWS Identity and Access Management (IAM) controls who and what can access each r
 |---|---|---|---|
 | `CleanupRole` | Bucket cleanup Lambda function | Managed: `AWSLambdaBasicExecutionRole`. Inline: list, delete objects and delete object versions | The inline policy is scoped to this one bucket's ARN, not `*`. |
 | `ServerRole` (via `ServerProfile`) | Web and application EC2 instances | Managed: `AmazonSSMManagedInstanceCore` | Grants Session Manager access only. The instances have no permissions to S3, RDS or other services. |
+
+The roles created by the stacks in my account:
+
+![IAM roles created by CloudFormation](docs/screenshots/iam-roles.png)
+
+**CleanupRole permissions.** The managed policy for logs, plus the inline policy scoped to the website bucket:
+
+![CleanupRole permissions](docs/screenshots/iam-cleanup-role.png)
+
+**ServerRole permissions.** Only `AmazonSSMManagedInstanceCore` is attached:
+
+![ServerRole permissions](docs/screenshots/iam-server-role.png)
 
 EC2 instances receive their role through an **instance profile**, and the role's temporary credentials are delivered through the instance metadata service. IMDSv2 is enforced on every instance, which protects these credentials against server-side request forgery attacks.
 
@@ -159,11 +183,11 @@ Learner Lab does not permit the creation of IAM roles. To support both environme
 
 The role resources use a CloudFormation `Condition`, so they are created only when `IamMode` is set to `create`. Note that `LabRole` is broader than the custom roles, so the `create` mode is the recommended option outside the lab.
 
-All deployments were run from AWS CloudShell in `us-east-1`, which provides the AWS CLI with credentials already configured.
+I first tried to deploy in AWS Academy, but my course only gave me access to guided labs, which block CloudShell, CloudFormation, CloudFront and RDS. I therefore deployed both stacks in my personal AWS account with `IamMode=create`. This also meant the custom least-privilege roles were actually created and used, rather than the broader `LabRole`. All deployments were run from AWS CloudShell in `us-east-1`, which provides the AWS CLI with credentials already configured.
 
 ## Teardown
 
-The NAT gateway, load balancers and RDS instance consume credits while running, so both stacks are deleted after testing:
+The NAT gateway, load balancers and RDS instance are charged by the hour while they run, so both stacks are deleted straight after testing. The leftover RDS snapshot is then deleted manually in the console.
 
 ```bash
 ./scripts/teardown.sh
@@ -187,15 +211,47 @@ On my first pull request, the check failed because the `templates/` and `scripts
 
 ## Testing
 
-| Test | Result |
-|---|---|
-| `cfn-lint templates/*.yaml` passes | |
-| Website loads over HTTPS with "L00205200 - Raju" in the header | |
-| Direct access to an S3 object URL returns 403 (bucket is private) | |
-| A non-existent page (for example `/abc`) returns the custom 404 page | |
-| Three-tier page displays `database_reachable: true` | |
-| A terminated application instance is replaced by the Auto Scaling group | |
-| `teardown.sh` deletes both stacks successfully | |
+| Test | Result | Evidence |
+|---|---|---|
+| `cfn-lint` passes on every pull request | Pass | GitHub Actions checks on each PR |
+| Website loads over HTTPS with "L00205200 - Raju" in the header | Pass | `website.png` |
+| Website files are stored in the S3 bucket | Pass | `s3-bucket.png` |
+| Bucket blocks all public access | Pass | `s3-permissions.png` |
+| Direct access to an S3 object URL returns 403 (bucket is private) | Pass | `cloudshell-tests.png` |
+| HTTP requests are redirected to HTTPS (301) | Pass | `cloudshell-tests.png` |
+| A non-existent page (for example `/abc`) returns 404 | Pass | `cloudshell-tests.png` |
+| CloudFront adds security headers (HSTS, X-Frame-Options) | Pass | `cloudshell-tests.png` |
+| Three-tier page displays `database_reachable: true` | Pass | `three-tier.png` |
+| Stacks create least-privilege IAM roles | Pass | `iam-roles.png`, `iam-cleanup-role.png`, `iam-server-role.png` |
+
+### Test commands
+
+These commands were run in CloudShell to test the security settings and the three-tier connection:
+
+```bash
+# 1. Direct S3 access - expect 403
+curl -s -o /dev/null -w "%{http_code}\n" https://<bucket-name>.s3.amazonaws.com/index.html
+
+# 2. HTTP to HTTPS redirect - expect 301
+curl -s -o /dev/null -w "%{http_code}\n" http://<distribution>.cloudfront.net
+
+# 3. Missing page - expect 404
+curl -s -o /dev/null -w "%{http_code}\n" https://<distribution>.cloudfront.net/abc
+
+# 4. Security headers - expect strict-transport-security and x-frame-options
+curl -sI https://<distribution>.cloudfront.net | grep -i -E "strict-transport|x-frame"
+
+# 5. Three-tier API - expect "database_reachable": true
+curl -s http://<load-balancer-dns>/api
+```
+
+![CloudShell test results](docs/screenshots/cloudshell-tests.png)
+
+### S3 bucket contents and permissions
+
+![S3 bucket contents](docs/screenshots/s3-bucket.png)
+
+![S3 bucket permissions](docs/screenshots/s3-permissions.png)
 
 ## Tutorials and LLM Usage
 
@@ -206,6 +262,6 @@ The brief permits the use of tutorials or an LLM for the basics, provided they a
   - *"Create CloudFormation templates for an S3 static website with my L-number in the header and a three-tier architecture, following best practice."*
   - *"I have AWS Academy Learner Lab credits, give me the steps to create the website and three tier using the assignment, create the static website also."*
 
-  Claude was also used to review and edit the wording of this README and the code comments.
+  Claude was also used to review and edit the wording of this README and the code comments, and for step-by-step guidance on Git and on deploying to my personal AWS account.
 
 
