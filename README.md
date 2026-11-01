@@ -75,7 +75,7 @@ Internet
   -> Database tier: RDS MySQL 8.4 on port 3306
 ```
 
-The web page includes a short script that calls `/api`. nginx forwards the request to the application tier, which checks whether it can connect to the database. When all tiers are connected correctly, the page displays `"database_reachable": true`. This provides a simple end-to-end test that the three tiers are communicating, rather than only confirming that each one deployed.
+To check that all three tiers actually work together, the web page has a small script that calls `/api`. nginx passes this request to the app tier, and the app tier tries to connect to the database. If everything is set up correctly, the page shows `"database_reachable": true`. This proves the tiers can talk to each other, not just that each one was created.
 
 ### Security
 
@@ -172,18 +172,19 @@ The NAT gateway, load balancers and RDS instance consume credits while running, 
 
 ## Part B - Tooling and Workflow
 
-**Development environment.** I used VS Code with the CloudFormation Linter extension, which highlights errors during editing. It identified that `EngineVersion: '8.0'` is not a valid RDS value. I updated it to a specific 8.4 release, as MySQL 8.0 is approaching the end of standard support.
+**Development environment.** I used VS Code to edit the templates and cfn-lint to check them. cfn-lint found that `EngineVersion: '8.0'` isn't a valid RDS value, so I changed it to a specific 8.4 version. MySQL 8.0 is also close to the end of standard support, so 8.4 is the better choice anyway.
 
-**Continuous integration.** A GitHub Actions workflow validates every pull request with three tools:
+**Continuous integration.** A GitHub Actions workflow checks every pull request using three tools:
 
-- `cfn-lint` checks the templates against the CloudFormation resource specification.
-- `checkov` reports security and best-practice findings. It runs in soft-fail mode, so findings are reported for review without blocking the merge.
-- `shellcheck` checks the deployment scripts for common errors.
+- `cfn-lint` checks the templates against the CloudFormation rules.
+- `checkov` looks for security and best-practice issues. It's set to soft-fail, so it reports problems without blocking the merge.
+- `shellcheck` checks the bash scripts for common mistakes.
 
-**Script reliability.** The deployment scripts use `set -euo pipefail`, so they stop at the first error rather than leaving a partially completed deployment.
+On my first pull request, the check failed because the `templates/` and `scripts/` folders weren't in the repo yet, so the linters had nothing to check. I fixed this by making each step skip itself when its files don't exist. After that, every pull request passed.
 
-**Branching.** Each change was developed on a dedicated branch and merged through a pull request:
-`feature/ci-lint`, `feature/s3-website`, `feature/website-content`, `feature/three-tier`, `feature/deploy-scripts`, `docs/readme`.
+**Script reliability.** The deploy scripts use `set -euo pipefail`, so they stop at the first error instead of carrying on and leaving a half-finished deployment.
+
+**Branching.** I made each change on its own branch and merged it through a pull request: `feature/ci-lint`, `feature/s3-website`, `feature/website-content`, `feature/three-tier`, `feature/deploy-scripts`, `docs/readme`. I deleted each branch after merging, but the pull requests and their check results can still be seen under **Pull requests → Closed**.
 
 ## Testing
 
