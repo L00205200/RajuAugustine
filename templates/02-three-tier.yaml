@@ -1,0 +1,587 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CloudFormation Lab, Part A1b: three-tier architecture for L00205200.
+  Web tier (nginx behind a public ALB), application tier (Python behind an
+  internal ALB) and database tier (Amazon RDS for MySQL).
+
+Parameters:
+  StudentName:
+    Type: String
+    Default: Raju
+  StudentNumber:
+    Type: String
+    Default: L00205200
+    AllowedPattern: '^L\d{8}$'
+
+  # lab: minimal, low-cost footprint.
+  # prod: Multi-AZ database and two instances per tier.
+  EnvironmentName:
+    Type: String
+    Default: lab
+    AllowedValues: [lab, prod]
+
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small, t3.medium]
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues: [db.t3.micro, db.t3.small]
+
+  # Resolves to the latest Amazon Linux 2023 AMI, so no AMI ID is hardcoded.
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+  # AWS Academy Learner Lab does not permit IAM role creation, so the
+  # pre-provisioned LabInstanceProfile is used there. In a standard AWS
+  # account, select "create" to provision a dedicated role instead.
+  IamMode:
+    Type: String
+    Default: learnerlab
+    AllowedValues: [learnerlab, create]
+
+Conditions:
+  IsProd: !Equals [!Ref EnvironmentName, prod]
+  CreateIam: !Equals [!Ref IamMode, create]
+
+Resources:
+
+  # ===========================================================================
+  # Networking
+  # Two Availability Zones, each with a public, an application and a database
+  # subnet. The six /24 subnets are calculated from the VPC CIDR with !Cidr.
+  # ===========================================================================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-vpc'
+
+  IGW:
+    Type: AWS::EC2::InternetGateway
+  IGWAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref IGW
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 6, 8]]
+      Tags: [{Key: Name, Value: public-a}]
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 6, 8]]
+      Tags: [{Key: Name, Value: public-b}]
+
+  AppSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Select [2, !Cidr [!Ref VpcCidr, 6, 8]]
+      Tags: [{Key: Name, Value: app-a}]
+  AppSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Select [3, !Cidr [!Ref VpcCidr, 6, 8]]
+      Tags: [{Key: Name, Value: app-b}]
+
+  DbSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Select [4, !Cidr [!Ref VpcCidr, 6, 8]]
+      Tags: [{Key: Name, Value: db-a}]
+  DbSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Select [5, !Cidr [!Ref VpcCidr, 6, 8]]
+      Tags: [{Key: Name, Value: db-b}]
+
+  # Public subnets route directly to the internet gateway.
+  PublicRoutes:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  PublicInternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttach
+    Properties:
+      RouteTableId: !Ref PublicRoutes
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IGW
+  PublicSubnetARoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRoutes
+  PublicSubnetBRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRoutes
+
+  # The NAT gateway gives the private instances outbound access for package
+  # installation. A single NAT gateway is used to reduce cost; a production
+  # deployment should have one per Availability Zone.
+  NatIP:
+    Type: AWS::EC2::EIP
+    DependsOn: IGWAttach
+    Properties:
+      Domain: vpc
+  NAT:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatIP.AllocationId
+      SubnetId: !Ref PublicSubnetA
+
+  AppRoutes:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  AppNatRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref AppRoutes
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NAT
+  AppSubnetARoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppSubnetA
+      RouteTableId: !Ref AppRoutes
+  AppSubnetBRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppSubnetB
+      RouteTableId: !Ref AppRoutes
+
+  # The database route table has no default route, so the database subnets
+  # have no inbound or outbound internet access.
+  DbRoutes:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  DbSubnetARoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DbSubnetA
+      RouteTableId: !Ref DbRoutes
+  DbSubnetBRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DbSubnetB
+      RouteTableId: !Ref DbRoutes
+
+  # ===========================================================================
+  # Security groups
+  # Each layer accepts traffic only from the layer directly in front of it:
+  # Internet -> public ALB :80 -> web :80 -> internal ALB :80 -> app :8080 -> DB :3306
+  # ===========================================================================
+  PublicLbSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public load balancer - HTTP from the internet
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  WebServerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Web servers - traffic from the public load balancer only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref PublicLbSG
+
+  AppLbSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Internal load balancer - traffic from the web servers only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref WebServerSG
+
+  AppServerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Application servers - traffic from the internal load balancer only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AppLbSG
+
+  DatabaseSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: MySQL - traffic from the application servers only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref AppServerSG
+
+  # ===========================================================================
+  # IAM
+  # SSH is not used and no key pairs are required. Administrative access is
+  # through AWS Systems Manager Session Manager.
+  # These resources are created only when IamMode is set to "create".
+  # ===========================================================================
+  ServerRole:
+    Type: AWS::IAM::Role
+    Condition: CreateIam
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  ServerProfile:
+    Type: AWS::IAM::InstanceProfile
+    Condition: CreateIam
+    Properties:
+      Roles: [!Ref ServerRole]
+
+  # ===========================================================================
+  # Database tier
+  # ===========================================================================
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private database subnets with no internet route
+      SubnetIds: [!Ref DbSubnetA, !Ref DbSubnetB]
+
+  # A random password is generated by Secrets Manager. It does not appear in
+  # the template, the repository or the CloudFormation console.
+  DbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: !Sub 'MySQL administrator credentials for ${AWS::StackName}'
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "admin"}'
+        GenerateStringKey: password
+        PasswordLength: 24
+        ExcludeCharacters: '"@/\'''
+
+  MySQLDatabase:
+    Type: AWS::RDS::DBInstance
+    # A final snapshot is retained if the stack is deleted or the instance replaced.
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: mysql
+      EngineVersion: '8.4.8'   # MySQL 8.4 LTS; 8.0 is approaching end of standard support
+      DBInstanceClass: !Ref DBInstanceClass
+      DBName: appdb
+      # Credentials are resolved from Secrets Manager at deployment time.
+      MasterUsername: !Sub '{{resolve:secretsmanager:${DbSecret}:SecretString:username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DbSecret}:SecretString:password}}'
+      AllocatedStorage: '20'
+      StorageType: gp3
+      StorageEncrypted: true
+      PubliclyAccessible: false
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups: [!Ref DatabaseSG]
+      BackupRetentionPeriod: 7
+      AutoMinorVersionUpgrade: true
+      MultiAZ: !If [IsProd, true, false]
+      DeletionProtection: !If [IsProd, true, false]
+
+  # Links the secret to the database instance, adding the host and port to
+  # the secret so an application can read all connection details from one place.
+  DbSecretAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref DbSecret
+      TargetId: !Ref MySQLDatabase
+      TargetType: AWS::RDS::DBInstance
+
+  # ===========================================================================
+  # Application tier: internal load balancer and Python application servers
+  # ===========================================================================
+  AppLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal   # Not reachable from the internet
+      Subnets: [!Ref AppSubnetA, !Ref AppSubnetB]
+      SecurityGroups: [!Ref AppLbSG]
+
+  AppTargets:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VPC
+      Protocol: HTTP
+      Port: 8080
+      TargetType: instance
+      HealthCheckPath: /health
+
+  AppLbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref AppLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AppTargets
+
+  AppServerTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Name: !If [CreateIam, !Ref ServerProfile, LabInstanceProfile]
+        SecurityGroupIds: [!Ref AppServerSG]
+        MetadataOptions:
+          HttpTokens: required   # Enforces IMDSv2
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 8
+              VolumeType: gp3
+              Encrypted: true
+        # Lightweight Python API built on the standard library, so no packages
+        # are installed. The /api endpoint reports which server responded and
+        # whether the database is reachable, which confirms end-to-end
+        # connectivity across all three tiers.
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            cat > /opt/app.py <<'EOF'
+            import json
+            import socket
+            from http.server import BaseHTTPRequestHandler, HTTPServer
+
+            DB_HOST = "${MySQLDatabase.Endpoint.Address}"
+
+
+            def can_reach_db():
+                """Return True if a TCP connection to MySQL succeeds."""
+                try:
+                    socket.create_connection((DB_HOST, 3306), timeout=2).close()
+                    return True
+                except OSError:
+                    return False
+
+
+            class Handler(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    if self.path == "/health":
+                        body = b"ok"
+                    else:
+                        body = json.dumps({
+                            "tier": "app",
+                            "server": socket.gethostname(),
+                            "database_reachable": can_reach_db(),
+                        }).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body)
+
+
+            HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+            EOF
+
+            # Run the API as a systemd service so it restarts automatically
+            cat > /etc/systemd/system/labapp.service <<'EOF'
+            [Unit]
+            Description=Lab application tier API
+            [Service]
+            ExecStart=/usr/bin/python3 /opt/app.py
+            Restart=always
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+            systemctl enable --now labapp
+
+  AppServerGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: [!Ref AppSubnetA, !Ref AppSubnetB]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref AppServerTemplate
+        Version: !GetAtt AppServerTemplate.LatestVersionNumber
+      MinSize: !If [IsProd, '2', '1']
+      DesiredCapacity: !If [IsProd, '2', '1']
+      MaxSize: '4'
+      TargetGroupARNs: [!Ref AppTargets]
+      HealthCheckType: ELB          # Replaces instances that fail the load balancer health check
+      HealthCheckGracePeriod: 120
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-app'
+          PropagateAtLaunch: true
+
+  AppCpuScaling:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AppServerGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 60   # Scales out when average CPU exceeds 60%
+
+  # ===========================================================================
+  # Web tier: public load balancer and nginx web servers
+  # ===========================================================================
+  WebLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+      SecurityGroups: [!Ref PublicLbSG]
+
+  WebTargets:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VPC
+      Protocol: HTTP
+      Port: 80
+      TargetType: instance
+      HealthCheckPath: /
+
+  WebLbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref WebLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref WebTargets
+
+  WebServerTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Name: !If [CreateIam, !Ref ServerProfile, LabInstanceProfile]
+        SecurityGroupIds: [!Ref WebServerSG]
+        MetadataOptions:
+          HttpTokens: required   # Enforces IMDSv2
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 8
+              VolumeType: gp3
+              Encrypted: true
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            dnf install -y nginx
+
+            # Home page: student header plus a request to /api, which is
+            # passed through to the application tier
+            cat > /usr/share/nginx/html/index.html <<'EOF'
+            <!DOCTYPE html>
+            <html lang="en">
+            <head><meta charset="utf-8"><title>${StudentNumber} - ${StudentName}</title></head>
+            <body style="font-family: Arial, sans-serif; text-align: center">
+              <h1>${StudentNumber} - ${StudentName}</h1>
+              <p>Web (nginx) &rarr; Application (Python) &rarr; Database (RDS MySQL)</p>
+              <pre id="out">Contacting the application tier...</pre>
+              <script>
+                fetch('/api')
+                  .then(res => res.json())
+                  .then(data => out.textContent = JSON.stringify(data, null, 2))
+                  .catch(err => out.textContent = 'Unable to reach the application tier: ' + err);
+              </script>
+            </body>
+            </html>
+            EOF
+
+            # Forward /api requests to the internal load balancer
+            cat > /etc/nginx/default.d/api.conf <<'EOF'
+            location /api {
+                proxy_pass http://${AppLoadBalancer.DNSName}/;
+                proxy_set_header Host $host;
+            }
+            EOF
+
+            systemctl enable --now nginx
+
+  WebServerGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      # Web servers are placed in private subnets; only the load balancer is public.
+      VPCZoneIdentifier: [!Ref AppSubnetA, !Ref AppSubnetB]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebServerTemplate
+        Version: !GetAtt WebServerTemplate.LatestVersionNumber
+      MinSize: !If [IsProd, '2', '1']
+      DesiredCapacity: !If [IsProd, '2', '1']
+      MaxSize: '4'
+      TargetGroupARNs: [!Ref WebTargets]
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 120
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-web'
+          PropagateAtLaunch: true
+
+  WebCpuScaling:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref WebServerGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 60
+
+Outputs:
+  WebsiteURL:
+    Description: Public address of the three-tier website
+    Value: !Sub 'http://${WebLoadBalancer.DNSName}'
+  AppLoadBalancerDNS:
+    Description: Internal load balancer address (reachable only from within the VPC)
+    Value: !GetAtt AppLoadBalancer.DNSName
+  DatabaseEndpoint:
+    Description: RDS MySQL endpoint
+    Value: !GetAtt MySQLDatabase.Endpoint.Address
+  DatabaseSecretArn:
+    Description: Secrets Manager secret containing the database credentials
+    Value: !Ref DbSecret
