@@ -44,7 +44,7 @@ CloudFormation cannot upload files to a bucket on its own, so `scripts/deploy-we
 
 Keeping the content in a separate folder means the HTML can be updated and redeployed without changing the template.
 
-CloudFormation cannot delete a bucket that still contains objects, and versioning keeps previous versions as well. To handle this, the template includes a small Lambda-backed custom resource that empties the bucket when the stack is deleted, which reduces teardown to a single command. This approach follows the AWS guidance on using Lambda with infrastructure as code referenced in the brief.
+One problem I ran into is that CloudFormation won't delete an S3 bucket if there are still files in it. To fix this, I added a small Lambda function that empties the bucket automatically when the stack is deleted. This means I can remove everything with one command. I got the idea from the AWS page on Lambda and infrastructure as code that was linked in the brief.
 
 ### Deployment
 
